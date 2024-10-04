@@ -270,129 +270,6 @@ async def get_filters():
     return result
 
 
-@app.get("/export-csv/")
-async def export_csv(
-        offset: int = 0,
-        limit: int = 15,
-        sort: str = "rank:desc",
-        filter: Optional[str] = None,
-        search: Optional[str] = None,
-        current_class: str = 'kingdom',
-        phylogeny_filters: Optional[str] = None
-):
-    """
-    Exports the current page of records from the specified Elasticsearch index
-    as a CSV file.
-
-
-    :param offset: Starting index for pagination.
-    :param limit: Number of records to return.
-    :param sort: Sorting criteria (field and order).
-    :param filter: Comma-separated filters in the format 'field:value'.
-    :param search: Search query string.
-    :param current_class: Taxonomy class for filtering.
-    :param phylogeny_filters: Filters for phylogeny in the format 'name:value'.
-    :return: CSV file as a downloadable response.
-    """
-
-    # Build the Elasticsearch query body
-    body = {
-        "aggs": {
-            aggregation_field: {"terms": {"field": aggregation_field}}
-            for aggregation_field in DATA_PORTAL_AGGREGATIONS
-        },
-        "aggs": {
-            "taxonomies": {
-                "nested": {"path": f"taxonomies.{current_class}"},
-                "aggs": {
-                    current_class: {
-                        "terms": {
-                            "field": f"taxonomies."
-                                     f"{current_class}.scientificName"}
-                    }
-                }
-            }
-        }
-    }
-
-    # Apply phylogeny filters
-    if phylogeny_filters:
-        body.setdefault("query", {"bool": {"filter": []}})
-        for phylogeny_filter in phylogeny_filters.split("-"):
-            name, value = phylogeny_filter.split(":")
-            body["query"]["bool"]["filter"].append({
-                "nested": {
-                    "path": f"taxonomies.{name}",
-                    "query": {"bool": {"filter": [{"term": {
-                        f"taxonomies.{name}.scientificName": value}}]}}
-                }
-            })
-
-    # Apply general filters
-    if filter:
-        body.setdefault("query", {"bool": {"filter": []}})
-        for filter_item in filter.split(","):
-            if current_class in filter_item:
-                _, value = filter_item.split(":")
-                body["query"]["bool"]["filter"].append({
-                    "nested": {
-                        "path": f"taxonomies.{current_class}",
-                        "query": {"bool": {"filter": [{"term": {
-                            f"taxonomies.{current_class}."
-                            f"scientificName": value}}]}}
-                    }
-                })
-            else:
-                filter_name, filter_value = filter_item.split(":")
-                body["query"]["bool"]["filter"].append(
-                    {"term": {filter_name: filter_value}})
-
-    # Apply search string
-    if search:
-        body.setdefault("query", {"bool": {"must": {"bool": {"should": []}}}})
-        body["query"]["bool"]["must"]["bool"]["should"].extend([
-            {"wildcard": {"organism": {"value": f"*{search}*",
-                                       "case_insensitive": True}}},
-            {"wildcard": {"commonName": {"value": f"*{search}*",
-                                         "case_insensitive": True}}},
-            {"wildcard": {
-                "symbionts_records.organism.text": {"value": f"*{search}*",
-                                                    "case_insensitive": True}}}
-        ])
-
-    # Perform the Elasticsearch search query
-    response = await es.search(index='data_portal', sort=sort, from_=offset,
-                               size=limit, body=body)
-    hits = response['hits']['hits']
-
-    if not hits:
-        return {"message": "No data found."}
-
-    # Define the columns and their title case versions
-    columns = {'organism', 'commonName', 'commonNameSource', 'currentStatus'}
-    title_case_columns = [convert_to_title_case(col) for col in columns]
-
-    # Prepare CSV output
-    output = StringIO()
-    writer = csv.DictWriter(output, fieldnames=title_case_columns)
-    writer.writeheader()
-
-    for hit in hits:
-        row = {convert_to_title_case(col): hit['_source'].get(col, '') for col
-               in columns}
-        writer.writerow(row)
-
-    output.seek(0)
-
-    headers = {
-        'Content-Disposition': 'attachment; filename="data_portal.csv"',
-        'Content-Type': 'text/csv'
-    }
-
-    return Response(content=output.getvalue(), media_type="text/csv",
-                    headers=headers)
-
-
 @app.get("/{index}")
 async def root(index: str, offset: int = 0, limit: int = 15,
                sort: str = "currentStatus:asc", filter: str = None,
@@ -529,27 +406,15 @@ async def root(index: str, offset: int = 0, limit: int = 15,
 
     # adding search string
     if search:
-        # body already has filter parameters
-        if "query" in body:
-            # body["query"]["bool"].update({"should": []})
-            body["query"]["bool"].update({"must": {}})
-        else:
-            # body["query"] = {"bool": {"should": []}}
-            body["query"] = {"bool": {"must": {}}}
-        body["query"]["bool"]["must"] = {"bool": {"should": []}}
-        body["query"]["bool"]["must"]["bool"]["should"].append(
-            {"wildcard": {"organism": {"value": f"*{search}*",
-                                       "case_insensitive": True}}}
-        )
-        body["query"]["bool"]["must"]["bool"]["should"].append(
-            {"wildcard": {"commonName": {"value": f"*{search}*",
-                                         "case_insensitive": True}}}
-        )
-        body["query"]["bool"]["must"]["bool"]["should"].append(
-            {"wildcard": {"symbionts_records.organism.text":
-                              {"value": f"*{search}*",
-                               "case_insensitive": True}}}
-        )
+        # Ensure the body has a query structure in place
+        body.setdefault("query", {"bool": {"must": {"bool": {"should": []}}}})
+
+        search_fields = ["organism", "commonName", "symbionts_records.organism.text"]
+
+        for field in search_fields:
+            body["query"]["bool"]["must"]["bool"]["should"].append({
+                "wildcard": {field: {"value": f"*{search}*", "case_insensitive": True}}
+            })
 
     if action == 'download':
         response = await es.search(index=index, sort=sort, from_=offset, body=body, size=50000)
@@ -660,6 +525,7 @@ def create_data_files_csv(results, download_option):
 
         elif download_option.lower() == "annotation":
             annotations = record.get("annotation", [])
+            print("annotations: ", annotations)
             for annotation in annotations:
                 gtf = annotation.get("annotation", {}).get("GTF", "-")
                 gff3 = annotation.get("annotation", {}).get("GFF3", "-")
