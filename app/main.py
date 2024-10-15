@@ -1,11 +1,13 @@
 import csv
-import os
 import re
 from io import StringIO
-from typing import Optional, List
+from typing import Optional
 from elasticsearch import AsyncElasticsearch, AIOHttpConnection
 from fastapi import FastAPI, Response
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import io
 
 import json
 
@@ -268,134 +270,11 @@ async def get_filters():
     return result
 
 
-@app.get("/export-csv/")
-async def export_csv(
-        offset: int = 0,
-        limit: int = 15,
-        sort: str = "rank:desc",
-        filter: Optional[str] = None,
-        search: Optional[str] = None,
-        current_class: str = 'kingdom',
-        phylogeny_filters: Optional[str] = None
-):
-    """
-    Exports the current page of records from the specified Elasticsearch index
-    as a CSV file.
-
-
-    :param offset: Starting index for pagination.
-    :param limit: Number of records to return.
-    :param sort: Sorting criteria (field and order).
-    :param filter: Comma-separated filters in the format 'field:value'.
-    :param search: Search query string.
-    :param current_class: Taxonomy class for filtering.
-    :param phylogeny_filters: Filters for phylogeny in the format 'name:value'.
-    :return: CSV file as a downloadable response.
-    """
-
-    # Build the Elasticsearch query body
-    body = {
-        "aggs": {
-            aggregation_field: {"terms": {"field": aggregation_field}}
-            for aggregation_field in DATA_PORTAL_AGGREGATIONS
-        },
-        "aggs": {
-            "taxonomies": {
-                "nested": {"path": f"taxonomies.{current_class}"},
-                "aggs": {
-                    current_class: {
-                        "terms": {
-                            "field": f"taxonomies."
-                                     f"{current_class}.scientificName"}
-                    }
-                }
-            }
-        }
-    }
-
-    # Apply phylogeny filters
-    if phylogeny_filters:
-        body.setdefault("query", {"bool": {"filter": []}})
-        for phylogeny_filter in phylogeny_filters.split("-"):
-            name, value = phylogeny_filter.split(":")
-            body["query"]["bool"]["filter"].append({
-                "nested": {
-                    "path": f"taxonomies.{name}",
-                    "query": {"bool": {"filter": [{"term": {
-                        f"taxonomies.{name}.scientificName": value}}]}}
-                }
-            })
-
-    # Apply general filters
-    if filter:
-        body.setdefault("query", {"bool": {"filter": []}})
-        for filter_item in filter.split(","):
-            if current_class in filter_item:
-                _, value = filter_item.split(":")
-                body["query"]["bool"]["filter"].append({
-                    "nested": {
-                        "path": f"taxonomies.{current_class}",
-                        "query": {"bool": {"filter": [{"term": {
-                            f"taxonomies.{current_class}."
-                            f"scientificName": value}}]}}
-                    }
-                })
-            else:
-                filter_name, filter_value = filter_item.split(":")
-                body["query"]["bool"]["filter"].append(
-                    {"term": {filter_name: filter_value}})
-
-    # Apply search string
-    if search:
-        body.setdefault("query", {"bool": {"must": {"bool": {"should": []}}}})
-        body["query"]["bool"]["must"]["bool"]["should"].extend([
-            {"wildcard": {"organism": {"value": f"*{search}*",
-                                       "case_insensitive": True}}},
-            {"wildcard": {"commonName": {"value": f"*{search}*",
-                                         "case_insensitive": True}}},
-            {"wildcard": {
-                "symbionts_records.organism.text": {"value": f"*{search}*",
-                                                    "case_insensitive": True}}}
-        ])
-
-    # Perform the Elasticsearch search query
-    response = await es.search(index='data_portal', sort=sort, from_=offset,
-                               size=limit, body=body)
-    hits = response['hits']['hits']
-
-    if not hits:
-        return {"message": "No data found."}
-
-    # Define the columns and their title case versions
-    columns = {'organism', 'commonName', 'commonNameSource', 'currentStatus'}
-    title_case_columns = [convert_to_title_case(col) for col in columns]
-
-    # Prepare CSV output
-    output = StringIO()
-    writer = csv.DictWriter(output, fieldnames=title_case_columns)
-    writer.writeheader()
-
-    for hit in hits:
-        row = {convert_to_title_case(col): hit['_source'].get(col, '') for col
-               in columns}
-        writer.writerow(row)
-
-    output.seek(0)
-
-    headers = {
-        'Content-Disposition': 'attachment; filename="data_portal.csv"',
-        'Content-Type': 'text/csv'
-    }
-
-    return Response(content=output.getvalue(), media_type="text/csv",
-                    headers=headers)
-
-
 @app.get("/{index}")
 async def root(index: str, offset: int = 0, limit: int = 15,
-               sort: str = "currentSt1ssaxn1atus:asc", filter: str = None,
+               sort: str = "currentStatus:asc", filter: str = None,
                search: str = None, current_class: str = 'kingdom',
-               phylogeny_filters: str = None):
+               phylogeny_filters: str = None, action: str = None):
     global value
     print(phylogeny_filters)
     # data structure for ES query
@@ -527,31 +406,21 @@ async def root(index: str, offset: int = 0, limit: int = 15,
 
     # adding search string
     if search:
-        # body already has filter parameters
-        if "query" in body:
-            # body["query"]["bool"].update({"should": []})
-            body["query"]["bool"].update({"must": {}})
-        else:
-            # body["query"] = {"bool": {"should": []}}
-            body["query"] = {"bool": {"must": {}}}
-        body["query"]["bool"]["must"] = {"bool": {"should": []}}
-        body["query"]["bool"]["must"]["bool"]["should"].append(
-            {"wildcard": {"organism": {"value": f"*{search}*",
-                                       "case_insensitive": True}}}
-        )
-        body["query"]["bool"]["must"]["bool"]["should"].append(
-            {"wildcard": {"commonName": {"value": f"*{search}*",
-                                         "case_insensitive": True}}}
-        )
-        body["query"]["bool"]["must"]["bool"]["should"].append(
-            {"wildcard": {"symbionts_records.organism.text":
-                              {"value": f"*{search}*",
-                               "case_insensitive": True}}}
-        )
-    print(json.dumps(body))
-    response = await es.search(
-        index=index, sort=sort, from_=offset, size=limit, body=body
-    )
+        # Ensure the body has a query structure in place
+        body.setdefault("query", {"bool": {"must": {"bool": {"should": []}}}})
+
+        search_fields = ["organism", "commonName", "symbionts_records.organism.text"]
+
+        for field in search_fields:
+            body["query"]["bool"]["must"]["bool"]["should"].append({
+                "wildcard": {field: {"value": f"*{search}*", "case_insensitive": True}}
+            })
+
+    if action == 'download':
+        response = await es.search(index=index, sort=sort, from_=offset, body=body, size=50000)
+    else:
+        response = await es.search(index=index, sort=sort, from_=offset, size=limit, body=body)
+
     data = dict()
     data['count'] = response['hits']['total']['value']
     data['results'] = response['hits']['hits']
@@ -591,3 +460,113 @@ async def details(index: str, record_id: str):
     if index == 'data_portal':
         data['aggregations'] = aggregations
     return data
+
+
+class QueryParam(BaseModel):
+    pageIndex: int
+    pageSize: int
+    searchValue: str = ''
+    sortValue: str
+    filterValue: str = ''
+    currentClass: str
+    phylogenyFilters: str
+    indexName: str
+    downloadOption: str
+
+
+@app.post("/data-download")
+async def get_data_files(item: QueryParam):
+    data = await root(item.indexName, 0, item.pageSize,
+                      item.sortValue, item.filterValue,
+                      item.searchValue, item.currentClass,
+                      item.phylogenyFilters, 'download')
+
+    csv_data = create_data_files_csv(data['results'], item.downloadOption)
+
+    # Return the byte stream as a downloadable CSV file
+    return StreamingResponse(
+        csv_data,
+        media_type='text/csv',
+        headers={"Content-Disposition": "attachment; filename=download.csv"}
+    )
+
+
+def create_data_files_csv(results, download_option):
+    header = []
+    if download_option.lower() == "assemblies":
+        header = ["Scientific Name", "Accession", "Version", "Assembly Name", "Assembly Description",
+                  "Link to chromosomes, contigs and scaffolds all in one"]
+    elif download_option.lower() == "annotation":
+        header = ["Annotation GTF", "Annotation GFF3", "Proteins Fasta", "Transcripts Fasta",
+                  "Softmasked genomes Fasta"]
+    elif download_option.lower() == "raw_files":
+        header = ["Study Accession", "Sample Accession", "Experiment Accession", "Run Accession", "Tax Id",
+                  "Scientific Name", "FASTQ FTP", "Submitted FTP", "SRA FTP", "Library Construction Protocol"]
+    elif download_option.lower() == "metadata":
+        header = ['Organism', 'Common Name', 'Common Name Source', 'Current Status']
+
+    output = io.StringIO()
+    csv_writer = csv.writer(output)
+    csv_writer.writerow(header)
+
+    for entry in results:
+        record = entry["_source"]
+        if download_option.lower() == "assemblies":
+            assemblies = record.get("assemblies", [])
+            scientific_name = record.get("organism", "")
+            for assembly in assemblies:
+                accession = assembly.get("accession", "-")
+                version = assembly.get("version", "-")
+                assembly_name = assembly.get("assembly_name", "")
+                assembly_description = assembly.get("description", "")
+                link = f"https://www.ebi.ac.uk/ena/browser/api/fasta/{accession}?download=true&gzip=true" if accession else ""
+                entry = [scientific_name, accession, version, assembly_name, assembly_description, link]
+                csv_writer.writerow(entry)
+
+        elif download_option.lower() == "annotation":
+            annotations = record.get("annotation", [])
+            print("annotations: ", annotations)
+            for annotation in annotations:
+                gtf = annotation.get("annotation", {}).get("GTF", "-")
+                gff3 = annotation.get("annotation", {}).get("GFF3", "-")
+                proteins_fasta = annotation.get("proteins", {}).get("FASTA", "")
+                transcripts_fasta = annotation.get("transcripts", {}).get("FASTA", "")
+                softmasked_genomes_fasta = annotation.get("softmasked_genome", {}).get("FASTA", "")
+                entry = [gtf, gff3, proteins_fasta, transcripts_fasta, softmasked_genomes_fasta]
+                csv_writer.writerow(entry)
+
+        elif download_option.lower() == "raw_files":
+            experiments = record.get("experiment", [])
+            for experiment in experiments:
+                study_accession = experiment.get("study_accession", "")
+                sample_accession = experiment.get("sample_accession", "")
+                experiment_accession = experiment.get("experiment_accession", "")
+                run_accession = experiment.get("run_accession", "")
+                tax_id = experiment.get("tax_id", "")
+                scientific_name = experiment.get("scientific_name", "")
+                submitted_ftp = experiment.get("submitted_ftp", "")
+                sra_ftp = experiment.get("sra-ftp", "")
+                library_construction_protocol = experiment.get("library_construction_protocol", "")
+                fastq_ftp = experiment.get("fastq_ftp", "")
+
+                if fastq_ftp:
+                    fastq_list = fastq_ftp.split(";")
+                    for fastq in fastq_list:
+                        entry = [study_accession, sample_accession, experiment_accession, run_accession, tax_id,
+                                 scientific_name, fastq, submitted_ftp, sra_ftp, library_construction_protocol]
+                        csv_writer.writerow(entry)
+                else:
+                    entry = [study_accession, sample_accession, experiment_accession, run_accession, tax_id,
+                             scientific_name, fastq_ftp, submitted_ftp, sra_ftp, library_construction_protocol]
+                    csv_writer.writerow(entry)
+
+        elif download_option.lower() == "metadata":
+            organism = record.get('organism', '')
+            common_name = record.get('commonName', '')
+            common_name_source = record.get('commonNameSource', '')
+            current_status = record.get('currentStatus', '')
+            entry = [organism, common_name, common_name_source, current_status]
+            csv_writer.writerow(entry)
+
+    output.seek(0)
+    return io.BytesIO(output.getvalue().encode('utf-8'))
