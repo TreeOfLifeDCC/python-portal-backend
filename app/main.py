@@ -1,4 +1,5 @@
 import csv
+import os
 import re
 from io import StringIO
 from typing import Optional
@@ -9,7 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import io
 
-import json
 
 from .constants import DATA_PORTAL_AGGREGATIONS
 
@@ -19,9 +19,14 @@ origins = [
     "*"
 ]
 
-ES_HOST = 'https://prj-ext-dev-dtol-gcp-dr-349815.es.europe-west2.gcp.elastic-cloud.com'
-ES_USERNAME = 'elastic'
-ES_PASSWORD = 'ZG71gVFpLPB27hTF5xS8P3Vi'
+origins = [
+    "*"
+]
+
+
+ES_HOST = os.getenv('ES_CONNECTION_URL')
+ES_USERNAME = os.getenv('ES_USERNAME')
+ES_PASSWORD = os.getenv('ES_PASSWORD')
 
 app.add_middleware(
     CORSMiddleware,
