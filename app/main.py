@@ -9,7 +9,7 @@ from pydantic import BaseModel
 import io
 
 
-from .constants import DATA_PORTAL_AGGREGATIONS
+from .constants import DATA_PORTAL_AGGREGATIONS, ARTICLES_AGGREGATIONS
 
 app = FastAPI()
 
@@ -39,7 +39,7 @@ es = AsyncElasticsearch(
 
 @app.get("/{index}")
 async def root(index: str, offset: int = 0, limit: int = 15,
-               sort: str = "currentStatus:asc", filter: str = None,
+               sort: str | None = None, filter: str = None,
                search: str = None, current_class: str = 'kingdom',
                phylogeny_filters: str = None, action: str = None):
     if index == 'favicon.ico':
@@ -51,10 +51,16 @@ async def root(index: str, offset: int = 0, limit: int = 15,
     # building aggregations for every request
     body["aggs"] = dict()
 
-    for aggregation_field in DATA_PORTAL_AGGREGATIONS:
+    if 'articles' in index:
+        aggregations_list = ARTICLES_AGGREGATIONS
+    else:
+        aggregations_list = DATA_PORTAL_AGGREGATIONS
+
+    for aggregation_field in aggregations_list:
         body["aggs"][aggregation_field] = {
             "terms": {"field": aggregation_field + '.keyword'}
         }
+
 
     if 'data_portal' in index:
         body["aggs"]["experiment"] = {
@@ -107,13 +113,7 @@ async def root(index: str, offset: int = 0, limit: int = 15,
         }
     }
 
-    body["aggs"]["genome"] = {
-        "nested": {"path": "genome_notes"},
-        "aggs": {"genome_count": {"cardinality": {"field": "genome_notes.id"}
-                                  }
-                 }
 
-    }
     if phylogeny_filters:
         body["query"] = {
             "bool": {
@@ -209,24 +209,35 @@ async def root(index: str, offset: int = 0, limit: int = 15,
                     body["query"]["bool"]["filter"].append(
                         {"term": {filter_name: filter_value}})
 
-    # adding search string
+    # Adding search string
     if search:
         if "query" not in body:
             body["query"] = {"bool": {"must": {"bool": {"should": []}}}}
-        elif "must" not in body["query"]["bool"]:
-            body["query"]["bool"]["must"] = {"bool": {"should": []}}
+        else:
+            body["query"]["bool"].setdefault("must", {"bool": {"should": []}})
 
-        search_fields = ["organism", "commonName", "symbionts_records.organism.text"]
+        search_fields = (
+            ["title", "journal_name", "study_id", "organism_name"]
+            if 'articles' in index
+            else ["organism", "commonName", "symbionts_records.organism.text", "metagenomes_records.organism.text"]
+        )
 
-        wildcard_queries = [
-            {"wildcard": {
-                field: {"value": f"*{search}*", "case_insensitive": True}}}
-            for field in search_fields
-        ]
-        body["query"]["bool"]["must"]["bool"]["should"].extend(wildcard_queries)
+        for field in search_fields:
+            body["query"]["bool"]["must"]["bool"]["should"].append({
+                "wildcard": {
+                    field: {
+                        "value": f"*{search}*",
+                        "case_insensitive": True
+                    }
+                }
+            })
 
     if action == 'download':
-        response = await es.search(index=index, sort=sort, from_=offset, body=body, size=50000)
+        try:
+            response = await es.search(index=index, sort=sort, from_=offset,
+                                       body=body, size=50000)
+        except ConnectionTimeout:
+            return {"error": "Request to Elasticsearch timed out."}
     else:
         response = await es.search(index=index, sort=sort, from_=offset, size=limit, body=body)
 
