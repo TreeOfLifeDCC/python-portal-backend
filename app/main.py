@@ -9,7 +9,7 @@ from pydantic import BaseModel
 import io
 
 
-from .constants import DATA_PORTAL_AGGREGATIONS
+from .constants import DATA_PORTAL_AGGREGATIONS, ARTICLES_AGGREGATIONS
 
 app = FastAPI()
 
@@ -37,242 +37,9 @@ es = AsyncElasticsearch(
     use_ssl=True, verify_certs=False)
 
 
-@app.get("/downloader_utility_data/")
-async def downloader_utility_data(taxonomy_filter: str, data_status: str,
-                                  experiment_type: str, project_name: str):
-    body = dict()
-    if taxonomy_filter != '':
-
-        if taxonomy_filter:
-            body["query"] = {
-                "bool": {
-                    "filter": list()
-                }
-            }
-            nested_dict = {
-                "nested": {
-                    "path": "taxonomies.class",
-                    "query": {
-                        "bool": {
-                            "filter": list()
-                        }
-                    }
-                }
-            }
-            nested_dict["nested"]["query"]["bool"]["filter"].append(
-                {
-                    "term": {
-                        "taxonomies.class.scientificName": taxonomy_filter
-                    }
-                }
-            )
-            body["query"]["bool"]["filter"].append(nested_dict)
-
-    if data_status is not None and data_status != '':
-        split_array = data_status.split("-")
-        if split_array and split_array[0].strip() == 'Biosamples':
-            body["query"]["bool"]["filter"].append(
-                {"term": {'biosamples': split_array[1].strip()}}
-            )
-        elif split_array and split_array[0].strip() == 'Raw Data':
-            body["query"]["bool"]["filter"].append(
-                {"term": {'raw_data': split_array[1].strip()}}
-            )
-        elif split_array and split_array[0].strip() == 'Mapped Reads':
-            body["query"]["bool"]["filter"].append(
-                {"term": {'mapped_reads': split_array[1].strip()}})
-
-        elif split_array and split_array[0].strip() == 'Assemblies':
-            body["query"]["bool"]["filter"].append(
-                {"term": {'assemblies_status': split_array[1].strip()}})
-        elif split_array and split_array[0].strip() == 'Annotation Complete':
-            body["query"]["bool"]["filter"].append(
-                {"term": {'annotation_complete': split_array[1].strip()}})
-        elif split_array and split_array[0].strip() == 'Annotation':
-            body["query"]["bool"]["filter"].append(
-                {"term": {'annotation_status': split_array[1].strip()}})
-        elif split_array and split_array[0].strip() == 'Genome Notes':
-            nested_dict = {
-                "nested": {
-                    "path": "genome_notes",
-                    "query": {
-                        "bool": {
-                            "must": [{
-                                "exists": {
-                                    "field": "genome_notes.url"
-                                }
-                            }]
-                        }
-                    }
-                }
-            }
-            body["query"]["bool"]["filter"].append(nested_dict)
-    if experiment_type != '' and experiment_type is not None:
-        nested_dict = {
-            "nested": {
-                "path": "experiment",
-                "query": {
-                    "bool": {
-                        "must": [{
-                            "term": {
-                                "experiment.library_construction_protocol."
-                                "keyword": experiment_type
-                            }
-                        }]
-                    }
-                }
-            }
-        }
-        body["query"]["bool"]["filter"].append(nested_dict)
-    if project_name is not None and project_name != '':
-        body["query"]["bool"]["filter"].append(
-            {"term": {'project_name': project_name}})
-    print(body)
-    response = await es.search(index="data_portal", from_=0, size=10000,
-                               body=body)
-    total_count = response['hits']['total']['value']
-    result = response['hits']['hits']
-    results_count = len(response['hits']['hits'])
-    while total_count > results_count:
-        response1 = await es.search(index="data_portal", from_=results_count,
-                                    size=10000, body=body)
-        result.extend(response1['hits']['hits'])
-        results_count += len(response1['hits']['hits'])
-
-    return result
-
-
-@app.get("/downloader_utility_data_with_species/")
-async def downloader_utility_data_with_species(species_list: str,
-                                               project_name: str):
-    body = dict()
-    result = []
-    if species_list != '' and species_list is not None:
-        species_list_array = species_list.split(",")
-        for organism in species_list_array:
-            body["query"] = {
-                "bool": {"filter": [{'term': {'_id': organism}},
-                                    {'term': {'project_name': project_name}}]}}
-            response = await es.search(index='data_portal',
-                                       body=body)
-            result.extend(response['hits']['hits'])
-
-    return result
-
-
-@app.get("/summary")
-async def summary():
-    response = await es.search(index="summary")
-    data = dict()
-    data['results'] = response['hits']['hits']
-    return data
-
-
-def convert_to_title_case(input_string):
-    # Add a space before each capital letter
-    spaced_string = re.sub(r'([A-Z])', r' \1', input_string)
-
-    # Split the string into words, capitalize each word, and join
-    # them with a space
-    title_cased_string = ' '.join(
-        word.capitalize() for word in spaced_string.split())
-
-    return title_cased_string
-
-
-@app.get("/detail_table_organism_filters")
-async def get_detail_table_organism_filters():
-    result = []
-    body = {
-        "size": 0, "aggregations": {
-            "trackingSystem": {"nested": {"path": "trackingSystem"}, "aggs": {
-                "rank": {"terms": {"field": "trackingSystem.rank",
-                                   "order": {"_key": "desc"}},
-                         "aggregations": {
-                             "name": {
-                                 "terms": {"field": "trackingSystem.name"},
-                                 "aggregations": {"status": {"terms": {
-                                     "field": "trackingSystem.status"}}}}}}}},
-            "symbionts_biosamples_status": {
-                "terms": {"field": "symbionts_biosamples_status"}},
-            "symbionts_raw_data_status": {
-                "terms": {"field": "symbionts_raw_data_status"}},
-            "symbionts_assemblies_status": {
-                "terms": {"field": "symbionts_assemblies_status"}}}
-    }
-
-    data = dict()
-    response = await es.search(index='tracking_status_index',
-                               size=0, body=body)
-    data['buckets'] = response['aggregations']['trackingSystem']['rank'][
-        'buckets']
-
-
-@app.get("/tracking_system_filters")
-async def get_filters():
-    """
-
-    :return:
-    """
-    result = []
-    body = {
-        "size": 0, "aggregations": {
-            "trackingSystem": {"nested": {"path": "trackingSystem"}, "aggs": {
-                "rank": {"terms": {"field": "trackingSystem.rank",
-                                   "order": {"_key": "desc"}},
-                         "aggregations": {
-                             "name": {
-                                 "terms": {"field": "trackingSystem.name"},
-                                 "aggregations": {"status": {"terms": {
-                                     "field": "trackingSystem.status"}}}}}}}},
-            "symbionts_biosamples_status": {
-                "terms": {"field": "symbionts_biosamples_status"}},
-            "symbionts_raw_data_status": {
-                "terms": {"field": "symbionts_raw_data_status"}},
-            "symbionts_assemblies_status": {
-                "terms": {"field": "symbionts_assemblies_status"}}}
-    }
-
-    data = dict()
-    response = await es.search(index='tracking_status_index',
-                               size=0, body=body)
-    data['buckets'] = response['aggregations']['trackingSystem']['rank'][
-        'buckets']
-    for entry in data['buckets']:
-        for name_bucket in entry['name']['buckets']:
-            name = name_bucket['key']
-            if name == 'annotation_complete' or name == 'biosamples' or name \
-                == 'assemblies' or name == 'raw_data':
-                for status_bucket in name_bucket['status']['buckets']:
-                    status = status_bucket['key']
-                    status_doc_count = status_bucket['doc_count']
-                    if status == 'Done':
-                        # Append the results
-                        result.append({
-                            'name': name,
-                            'doc_count': status_doc_count
-                        })
-    result.append({
-        'name': 'symbionts_biosamples_status',
-        'doc_count': response['aggregations']['symbionts_biosamples_status'][
-            'buckets']
-    })
-    result.append({
-        'name': 'symbionts_raw_data_status',
-        'doc_count': response['aggregations']['symbionts_raw_data_status'][
-            'buckets']
-    })
-    result.append({
-        'name': 'symbionts_assemblies_status',
-        'doc_count': response['aggregations']['symbionts_assemblies_status'][
-            'buckets']
-    })
-    return result
-
-
 @app.get("/{index}")
 async def root(index: str, offset: int = 0, limit: int = 15,
-               sort: str = "currentStatus:asc", filter: str = None,
+               sort: str | None = None, filter: str = None,
                search: str = None, current_class: str = 'kingdom',
                phylogeny_filters: str = None, action: str = None):
     if index == 'favicon.ico':
@@ -284,10 +51,58 @@ async def root(index: str, offset: int = 0, limit: int = 15,
     # building aggregations for every request
     body["aggs"] = dict()
 
-    for aggregation_field in DATA_PORTAL_AGGREGATIONS:
+    if 'articles' in index:
+        aggregations_list = ARTICLES_AGGREGATIONS
+    else:
+        aggregations_list = DATA_PORTAL_AGGREGATIONS
+
+    for aggregation_field in aggregations_list:
         body["aggs"][aggregation_field] = {
             "terms": {"field": aggregation_field + '.keyword'}
         }
+
+
+    if 'data_portal' in index:
+        body["aggs"]["experiment"] = {
+            "nested": {"path": "experiment"},
+            "aggs": {
+                "library_construction_protocol": {
+                    "terms": {
+                        "field": "experiment.library_construction_protocol.keyword",
+                    },
+                    "aggs": {
+                        "distinct_docs": {
+                            "reverse_nested": {},
+                            "aggs": {
+                                "parent_doc_count": {
+                                    "cardinality": {
+                                        "field": "organism.keyword"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if 'data_portal' in index or 'tracking_status' in index:
+            body["aggs"]["genome_notes"] = {
+                "nested": {"path": "genome_notes"},
+                "aggs": {
+                    "genome_count": {
+                        "reverse_nested": {},  # get to the parent document level
+                        "aggs": {
+                            "distinct_docs": {
+                                "cardinality": {
+                                    "field": "organism.keyword"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
     body["aggs"]["taxonomies"] = {
         "nested": {"path": f"taxonomies.{current_class}"},
         "aggs": {current_class: {
@@ -297,20 +112,8 @@ async def root(index: str, offset: int = 0, limit: int = 15,
         }
         }
     }
-    body["aggs"]["experiment"] = {
-        "nested": {"path": "experiment"},
-        "aggs": {"library_construction_protocol": {"terms": {
-            "field": "experiment.library_construction_protocol.keyword"}
-        }
-        }
-    }
-    body["aggs"]["genome"] = {
-        "nested": {"path": "genome_notes"},
-        "aggs": {"genome_count": {"cardinality": {"field": "genome_notes.id"}
-                                  }
-                 }
 
-    }
+
     if phylogeny_filters:
         body["query"] = {
             "bool": {
@@ -406,24 +209,35 @@ async def root(index: str, offset: int = 0, limit: int = 15,
                     body["query"]["bool"]["filter"].append(
                         {"term": {filter_name: filter_value}})
 
-    # adding search string
+    # Adding search string
     if search:
         if "query" not in body:
             body["query"] = {"bool": {"must": {"bool": {"should": []}}}}
-        elif "must" not in body["query"]["bool"]:
-            body["query"]["bool"]["must"] = {"bool": {"should": []}}
+        else:
+            body["query"]["bool"].setdefault("must", {"bool": {"should": []}})
 
-        search_fields = ["organism", "commonName", "symbionts_records.organism.text"]
+        search_fields = (
+            ["title", "journal_name", "study_id", "organism_name"]
+            if 'articles' in index
+            else ["organism", "commonName", "symbionts_records.organism.text", "metagenomes_records.organism.text"]
+        )
 
-        wildcard_queries = [
-            {"wildcard": {
-                field: {"value": f"*{search}*", "case_insensitive": True}}}
-            for field in search_fields
-        ]
-        body["query"]["bool"]["must"]["bool"]["should"].extend(wildcard_queries)
+        for field in search_fields:
+            body["query"]["bool"]["must"]["bool"]["should"].append({
+                "wildcard": {
+                    field: {
+                        "value": f"*{search}*",
+                        "case_insensitive": True
+                    }
+                }
+            })
 
     if action == 'download':
-        response = await es.search(index=index, sort=sort, from_=offset, body=body, size=50000)
+        try:
+            response = await es.search(index=index, sort=sort, from_=offset,
+                                       body=body, size=50000)
+        except ConnectionTimeout:
+            return {"error": "Request to Elasticsearch timed out."}
     else:
         response = await es.search(index=index, sort=sort, from_=offset, size=limit, body=body)
 
