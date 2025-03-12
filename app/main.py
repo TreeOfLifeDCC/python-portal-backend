@@ -251,25 +251,80 @@ async def root(index: str, offset: int = 0, limit: int = 15,
 @app.get("/{index}/{record_id}")
 async def details(index: str, record_id: str):
     body = dict()
-    if index == 'data_portal':
+    if 'data_portal' in index:
         body["query"] = {
-            "bool": {"filter": [{'term': {'organism': record_id}}]}}
-        body["aggregations"] = {'filters': {'nested': {'path': 'records'},
-                                            "aggs": {
-                                                'sex_filter': {'terms': {
-                                                    'field': 'records.sex',
-                                                    'size': 2000}},
-                                                'tracking_status_filter': {
-                                                    'terms': {
-                                                        'field': 'records'
-                                                                 '.trackingSystem',
-                                                        'size': 2000}},
-                                                'organism_part_filter': {
-                                                    'terms': {
-                                                        'field': 'records'
-                                                                 '.organismPart',
-                                                        'size': 2000}}
-                                            }}}
+            "bool": {
+                "filter": [
+                    {
+                        'term': {
+                            'organism': record_id
+                        }
+                    }
+                ]
+            }
+        }
+        body["aggs"] = dict()
+        body["aggs"]["metadata_filters"] = {
+            'nested': {'path': 'records'},
+            "aggs": {
+                'sex_filter': {
+                    'terms': {
+                        'field':
+                            'records.sex.keyword',
+                        'size': 2000}},
+                'tracking_status_filter': {
+                    'terms': {
+                        'field':
+                            'records.'
+                            'trackingSystem.keyword',
+                        'size': 2000}},
+                'organism_part_filter': {
+                    'terms': {
+                        'field': 'records'
+                                 '.organismPart.keyword',
+                        'size': 2000}}
+            }}
+        body["aggs"]["symbionts_filters"] = {
+            'nested': {'path': 'symbionts_records'},
+            "aggs": {
+                'sex_filter': {
+                    'terms': {
+                        'field':
+                            'symbionts_records.sex.keyword',
+                        'size': 2000}},
+                'tracking_status_filter': {
+                    'terms': {
+                        'field':
+                            'symbionts_records.'
+                            'trackingSystem.keyword',
+                        'size': 2000}},
+                'organism_part_filter': {
+                    'terms': {
+                        'field': 'symbionts_records'
+                                 '.organismPart.keyword',
+                        'size': 2000}}
+            }}
+        body['aggs']['metagenomes_filters'] = {
+            'nested': {'path': 'metagenomes_records'},
+            "aggs": {
+                'sex_filter': {
+                    'terms': {
+                        'field':
+                            'metagenomes_records.sex.keyword',
+                        'size': 2000}},
+                'tracking_status_filter': {
+                    'terms': {
+                        'field':
+                            'metagenomes_records.'
+                            'trackingSystem.keyword',
+                        'size': 2000}},
+                'organism_part_filter': {
+                    'terms': {
+                        'field': 'metagenomes_records'
+                                 '.organismPart.keyword',
+                        'size': 2000}}
+            }}
+
         response = await es.search(index=index, body=body)
         aggregations = response['aggregations']
     else:
@@ -277,7 +332,7 @@ async def details(index: str, record_id: str):
     data = dict()
     data['count'] = response['hits']['total']['value']
     data['results'] = response['hits']['hits']
-    if index == 'data_portal':
+    if 'data_portal' in index:
         data['aggregations'] = aggregations
     return data
 
