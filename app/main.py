@@ -235,10 +235,8 @@ async def root(index: str, offset: int = 0, limit: int = 15,
 
     if action == 'download':
         try:
-            print(body)
             response = await es.search(index=index, sort=sort, from_=offset,
                                        body=body, size=limit)
-            print(response['hits']['total']['value'])
         except ConnectionTimeout:
             return {"error": "Request to Elasticsearch timed out."}
     else:
