@@ -1,13 +1,14 @@
 import csv
 import os
 import re
-from elasticsearch import AsyncElasticsearch, AIOHttpConnection
+from elasticsearch import AsyncElasticsearch, AIOHttpConnection, ConnectionTimeout
 from fastapi import FastAPI, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import io
 
+from starlette.responses import JSONResponse
 
 from .constants import DATA_PORTAL_AGGREGATIONS, ARTICLES_AGGREGATIONS
 
@@ -234,8 +235,10 @@ async def root(index: str, offset: int = 0, limit: int = 15,
 
     if action == 'download':
         try:
+            print(body)
             response = await es.search(index=index, sort=sort, from_=offset,
-                                       body=body, size=50000)
+                                       body=body, size=limit)
+            print(response['hits']['total']['value'])
         except ConnectionTimeout:
             return {"error": "Request to Elasticsearch timed out."}
     else:
@@ -344,26 +347,54 @@ class QueryParam(BaseModel):
     sortValue: str
     filterValue: str = ''
     currentClass: str
-    phylogenyFilters: str
-    indexName: str
+    phylogeny_filters: str
+    index_name: str
     downloadOption: str
 
 
 @app.post("/data-download")
 async def get_data_files(item: QueryParam):
-    data = await root(item.indexName, 0, item.pageSize,
-                      item.sortValue, item.filterValue,
-                      item.searchValue, item.currentClass,
-                      item.phylogenyFilters, 'download')
+    data = await fetch_data_in_batches(item)
+    if len(data) > 0:
+        csv_data = create_data_files_csv(data, item.downloadOption,
+                                         item.index_name)
 
-    csv_data = create_data_files_csv(data['results'], item.downloadOption, item.indexName)
+        return StreamingResponse(
+            csv_data,
+            media_type='text/csv',
+            headers={"Content-Disposition": "attachment; filename=download.csv"}
+        )
+    else:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "There was an issue downloading the file"}
+        )
 
-    # Return the byte stream as a downloadable CSV file
-    return StreamingResponse(
-        csv_data,
-        media_type='text/csv',
-        headers={"Content-Disposition": "attachment; filename=download.csv"}
-    )
+
+async def fetch_data_in_batches(item: QueryParam):
+    offset = 0
+    batch_size = 1000
+    all_data = []
+
+    while True:
+
+        data = await root(
+            item.index_name, offset, batch_size,
+            item.sortValue, item.filterValue,
+            item.searchValue, item.currentClass,
+            item.phylogeny_filters, 'download'
+        )
+
+
+        results = data.get('results', [])
+        if not results:
+            break
+
+        all_data.extend(results)
+        offset += batch_size
+        print(f"Fetched {len(results)} results, total: {len(all_data)}")
+
+    return all_data
 
 
 def create_data_files_csv(results, download_option, index_name):
