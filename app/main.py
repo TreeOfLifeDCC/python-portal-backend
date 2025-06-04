@@ -1,6 +1,5 @@
 import csv
 import os
-import re
 from elasticsearch import AsyncElasticsearch, AIOHttpConnection, ConnectionTimeout
 from fastapi import FastAPI, Response
 from fastapi.responses import StreamingResponse
@@ -335,6 +334,14 @@ async def details(index: str, record_id: str):
     data['results'] = response['hits']['hits']
     if 'data_portal' in index:
         data['aggregations'] = aggregations
+    return data
+
+
+@app.get("/summary")
+async def summary():
+    response = await es.search(index="summary")
+    data = dict()
+    data['results'] = response['hits']['hits']
     return data
 
 
