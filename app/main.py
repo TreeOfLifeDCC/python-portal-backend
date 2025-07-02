@@ -57,10 +57,14 @@ async def root(index: str, offset: int = 0, limit: int = 15,
         aggregations_list = DATA_PORTAL_AGGREGATIONS
 
     for aggregation_field in aggregations_list:
-        body["aggs"][aggregation_field] = {
-            "terms": {"field": aggregation_field + '.keyword'}
-        }
-
+        if aggregation_field == 'images_available':
+            body["aggs"][aggregation_field] = {
+                "terms": {"field": aggregation_field}
+            }
+        else:
+            body["aggs"][aggregation_field] = {
+                "terms": {"field": aggregation_field + '.keyword'}
+            }
 
     if 'data_portal' in index:
         body["aggs"]["experiment"] = {
