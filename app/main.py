@@ -407,6 +407,7 @@ async def fetch_data_in_batches(item: QueryParam):
 
 
 def create_data_files_csv(results, download_option, index_name):
+    INSDC_ID = ''
     header = []
     if download_option.lower() == "assemblies":
         header = ["Scientific Name", "Accession", "Version", "Assembly Name", "Assembly Description",
@@ -418,7 +419,7 @@ def create_data_files_csv(results, download_option, index_name):
         header = ["Study Accession", "Sample Accession", "Experiment Accession", "Run Accession", "Tax Id",
                   "Scientific Name", "FASTQ FTP", "Submitted FTP", "SRA FTP", "Library Construction Protocol"]
     elif download_option.lower() == "metadata" and 'data_portal' in index_name:
-        header = ['Organism', 'Common Name', 'Common Name Source', 'Current Status']
+        header = ['Organism', 'Common Name', 'Common Name Source', 'Current Status','INSDC ID']
     elif download_option.lower() == "metadata" and 'tracking_status' in index_name:
         header = ['Organism', 'Common Name', 'Metadata submitted to BioSamples', 'Raw data submitted to ENA',
                   'Mapped reads submitted to ENA', 'Assemblies submitted to ENA',
@@ -484,7 +485,10 @@ def create_data_files_csv(results, download_option, index_name):
             common_name = record.get('commonName', '')
             common_name_source = record.get('commonNameSource', '')
             current_status = record.get('currentStatus', '')
-            entry = [organism, common_name, common_name_source, current_status]
+            experiments = record.get("experiment", [])
+            if experiments:
+                INSDC_ID = experiments[0].get("study_accession", "")
+            entry = [organism, common_name, common_name_source, current_status, INSDC_ID]
             csv_writer.writerow(entry)
 
         elif download_option.lower() == "metadata" and 'tracking_status' in index_name:
