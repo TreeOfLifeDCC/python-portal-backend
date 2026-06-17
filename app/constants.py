@@ -7,3 +7,16 @@ DATA_PORTAL_AGGREGATIONS = [
 ]
 
 ARTICLES_AGGREGATIONS = ["pubYear", "journalTitle", "articleType"]
+
+# Default allowlist of index name prefixes the API is permitted to query.
+# Overridable at runtime via the ALLOWED_INDEX_PREFIXES env var
+# (comma-separated). Used to stop attacker-controlled path segments from
+# targeting arbitrary or system Elasticsearch indices.
+ALLOWED_INDEX_PREFIXES = (
+    "data_portal",
+    "tracking_status_index",
+    "articles",
+    "summary",
+    "organisms_test",
+    "specimens_test",
+)

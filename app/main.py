@@ -1,40 +1,87 @@
 import csv
+import io
 import os
+import re
+
 from elasticsearch import AsyncElasticsearch, AIOHttpConnection, ConnectionTimeout
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import io
 
 from starlette.responses import JSONResponse
 
-from .constants import DATA_PORTAL_AGGREGATIONS, ARTICLES_AGGREGATIONS
+from .constants import (
+    DATA_PORTAL_AGGREGATIONS,
+    ARTICLES_AGGREGATIONS,
+    ALLOWED_INDEX_PREFIXES,
+)
 
 app = FastAPI()
 
-origins = [
-    "*"
-]
+# Public, unauthenticated API: any origin may read it. A wildcard origin is
+# safe here ONLY because credentials are disabled below -- "*" must never be
+# combined with allow_credentials=True.
+origins = ["*"]
 
 ES_HOST = os.getenv('ES_CONNECTION_URL')
 ES_USERNAME = os.getenv('ES_USERNAME')
 ES_PASSWORD = os.getenv('ES_PASSWORD')
+# TLS certificate verification is ON by default to protect the ES credentials
+# in transit. For a cluster using a self-signed cert, set ES_VERIFY_CERTS=false.
+ES_VERIFY_CERTS = os.getenv('ES_VERIFY_CERTS', 'true').lower() != 'false'
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# Allowlists constraining attacker-controlled input that would otherwise reach
+# Elasticsearch as a target index or as a query field name.
+_raw_index_prefixes = os.getenv('ALLOWED_INDEX_PREFIXES', '')
+ALLOWED_PREFIXES = tuple(
+    p.strip() for p in _raw_index_prefixes.split(',') if p.strip()
+) or ALLOWED_INDEX_PREFIXES
+INDEX_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]*$')
+TAXONOMY_RANK_RE = re.compile(r'^[a-zA-Z_]+$')
+FIELD_NAME_RE = re.compile(r'^[a-zA-Z0-9_.]+$')
+
+
+def validate_index(index: str) -> str:
+    """Reject any index that is not an allowlisted portal index.
+
+    Blocks reads against arbitrary or system indices and rejects ES
+    multi-index / wildcard expressions (``*``, ``_all``, comma lists and
+    leading-dot indices are all excluded by the character class).
+    """
+    if (
+        not index
+        or not INDEX_NAME_RE.match(index)
+        or not index.startswith(ALLOWED_PREFIXES)
+    ):
+        raise HTTPException(status_code=404, detail="Unknown index")
+    return index
+
+
+def validate_field_name(value: str, pattern: "re.Pattern") -> str:
+    """Reject field/path names that contain anything outside the allowlist."""
+    if not value or not pattern.match(value):
+        raise HTTPException(status_code=400, detail="Invalid query parameter")
+    return value
+
 
 es = AsyncElasticsearch(
     [ES_HOST],
     timeout=60,
     connection_class=AIOHttpConnection,
     http_auth=(ES_USERNAME, ES_PASSWORD),
-    use_ssl=True, verify_certs=False)
+    use_ssl=True,
+    verify_certs=ES_VERIFY_CERTS,
+    ssl_show_warn=ES_VERIFY_CERTS,
+)
 
 
 @app.get("/{index}")
@@ -44,6 +91,8 @@ async def root(index: str, offset: int = 0, limit: int = 15,
                phylogeny_filters: str = None, action: str = None):
     if index == 'favicon.ico':
         return None
+    validate_index(index)
+    validate_field_name(current_class, TAXONOMY_RANK_RE)
     global value
 
     # data structure for ES query
@@ -127,7 +176,8 @@ async def root(index: str, offset: int = 0, limit: int = 15,
         phylogeny_filters = phylogeny_filters.split("-")
         print(phylogeny_filters)
         for phylogeny_filter in phylogeny_filters:
-            name, value = phylogeny_filter.split(":")
+            name, value = phylogeny_filter.split(":", 1)
+            validate_field_name(name, TAXONOMY_RANK_RE)
             nested_dict = {
                 "nested": {
                     "path": f"taxonomies.{name}",
@@ -157,7 +207,7 @@ async def root(index: str, offset: int = 0, limit: int = 15,
             }
         for filter_item in filters:
             if current_class in filter_item:
-                _, value = filter_item.split(":")
+                _, value = filter_item.split(":", 1)
 
                 nested_dict = {
                     "nested": {
@@ -179,7 +229,8 @@ async def root(index: str, offset: int = 0, limit: int = 15,
                 body["query"]["bool"]["filter"].append(nested_dict)
 
             else:
-                filter_name, filter_value = filter_item.split(":")
+                filter_name, filter_value = filter_item.split(":", 1)
+                validate_field_name(filter_name, FIELD_NAME_RE)
 
                 if filter_name == 'experimentType':
 
@@ -254,6 +305,7 @@ async def root(index: str, offset: int = 0, limit: int = 15,
 
 @app.get("/{index}/{record_id}")
 async def details(index: str, record_id: str):
+    validate_index(index)
     body = dict()
     if 'data_portal' in index:
         body["query"] = {
@@ -332,7 +384,8 @@ async def details(index: str, record_id: str):
         response = await es.search(index=index, body=body)
         aggregations = response['aggregations']
     else:
-        response = await es.search(index=index, q=f"_id:{record_id}")
+        response = await es.search(
+            index=index, body={"query": {"ids": {"values": [record_id]}}})
     data = dict()
     data['count'] = response['hits']['total']['value']
     data['results'] = response['hits']['hits']
